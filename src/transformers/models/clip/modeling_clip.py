@@ -21,9 +21,10 @@ from typing import Any, Optional, Tuple, Union
 import torch
 import torch.utils.checkpoint
 from torch import nn
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 from ...activations import ACT2FN
-from ...modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
+from ...modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, SequenceClassifierOutput
 from ...modeling_utils import PreTrainedModel
 from ...utils import (
     ModelOutput,
@@ -671,7 +672,6 @@ class CLIPTextTransformer(nn.Module):
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
         )
-
     def _build_causal_attention_mask(self, bsz, seq_len, dtype):
         # lazily create causal attention mask, with full attention between the vision tokens
         # pytorch uses additive attention mask; fill with -inf
@@ -1068,4 +1068,99 @@ class CLIPModel(CLIPPreTrainedModel):
             image_embeds=image_embeds,
             text_model_output=text_outputs,
             vision_model_output=vision_outputs,
+        )
+
+
+@add_start_docstrings(CLIP_START_DOCSTRING)
+class CLIPForSequenceClassification(CLIPPreTrainedModel):
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.config = config
+
+        self.clip_text_model = CLIPTextModel(config.text_config)
+        classifier_dropout = 0
+        if hasattr(config, "classifier_dropout") and config.classifier_dropout is not None:
+            classifier_dropout = config.classifier_dropout
+        elif hasattr(config, "hidden_dropout_prob") and config.hidden_dropout_prob is not None:
+            classifier_dropout = config.hidden_dropout_prob
+        classifier_dropout = (
+            classifier_dropout
+        )
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.classifier = nn.Linear(config.projection_dim, config.num_labels)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    @add_start_docstrings_to_model_forward(CLIP_INPUTS_DOCSTRING)
+    @replace_return_docstrings(output_type=SequenceClassifierOutput, config_class=CLIPConfig)
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        labels: Optional[torch.Tensor] = None
+    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+
+        Returns:
+
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        text_model_output = self.clip_text_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict
+        )
+
+        text_embeds = text_model_output.pooler_output if return_dict else text_model_output[1]
+
+        text_embeds = self.dropout(text_embeds)
+        logits = self.classifier(text_embeds)
+
+        loss = None
+        if labels is not None:
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
+
+            if self.config.problem_type == "regression":
+                loss_fct = MSELoss()
+                if self.num_labels == 1:
+                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(logits, labels)
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
+
+        if not return_dict:
+            output = (logits,) + text_model_output[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return SequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=text_model_output.hidden_states if return_dict else text_model_output[2],
+            attentions=text_model_output.attentions if return_dict else text_model_output[3]
         )

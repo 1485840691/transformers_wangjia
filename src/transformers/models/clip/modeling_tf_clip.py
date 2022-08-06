@@ -1397,3 +1397,110 @@ class TFCLIPModel(TFCLIPPreTrainedModel):
         # TensorFlow cannot trace through nested dataclasses. Reference:
         # https://github.com/huggingface/transformers/pull/16886
         return output
+
+from ...modeling_tf_utils import (
+    TFCausalLanguageModelingLoss,
+    TFMaskedLanguageModelingLoss,
+    TFModelInputType,
+    TFMultipleChoiceLoss,
+    TFNextSentencePredictionLoss,
+    TFPreTrainedModel,
+    TFQuestionAnsweringLoss,
+    TFSequenceClassificationLoss,
+    TFTokenClassificationLoss,
+    get_initializer,
+    keras_serializable,
+    unpack_inputs,
+)
+
+from ...modeling_tf_outputs import (
+    TFBaseModelOutputWithPastAndCrossAttentions,
+    TFBaseModelOutputWithPoolingAndCrossAttentions,
+    TFCausalLMOutputWithCrossAttentions,
+    TFMaskedLMOutput,
+    TFMultipleChoiceModelOutput,
+    TFNextSentencePredictorOutput,
+    TFQuestionAnsweringModelOutput,
+    TFSequenceClassifierOutput,
+    TFTokenClassifierOutput,
+)
+
+@add_start_docstrings(
+    """
+    Bert Model transformer with a sequence classification/regression head on top (a linear layer on top of the pooled
+    output) e.g. for GLUE tasks.
+    """,
+    CLIP_START_DOCSTRING,
+)
+class TFCLIPForSequenceClassification(TFCLIPPreTrainedModel, TFSequenceClassificationLoss):
+    # names with a '.' represents the authorized unexpected/missing layers when a TF model is loaded from a PT model
+    _keys_to_ignore_on_load_unexpected = [r"mlm___cls", r"nsp___cls", r"cls.predictions", r"cls.seq_relationship"]
+    _keys_to_ignore_on_load_missing = [r"dropout"]
+
+    def __init__(self, config: CLIPConfig, *inputs, **kwargs):
+        super().__init__(config, *inputs, **kwargs)
+
+        self.num_labels = config.num_labels
+
+        self.clip_text_model = TFCLIPTextModel(config.text_config, name="clip")
+        classifier_dropout = (
+            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        )
+        self.dropout = tf.keras.layers.Dropout(rate=classifier_dropout)
+        self.classifier = tf.keras.layers.Dense(
+            units=config.num_labels,
+            kernel_initializer=get_initializer(config.initializer_range),
+            name="classifier",
+        )
+
+    @unpack_inputs
+    @add_start_docstrings_to_model_forward(CLIP_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    def call(
+        self,
+        input_ids: Optional[TFModelInputType] = None,
+        attention_mask: Optional[Union[np.ndarray, tf.Tensor]] = None,
+        position_ids: Optional[Union[np.ndarray, tf.Tensor]] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        labels: Optional[Union[np.ndarray, tf.Tensor]] = None,
+        training: Optional[bool] = False,
+    ) -> Union[TFSequenceClassifierOutput, Tuple[tf.Tensor]]:
+        r"""
+        labels (`tf.Tensor` or `np.ndarray` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+
+        text_model_output = self.clip_text_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            training=training,
+        )
+
+        pooled_output = text_model_output[1]
+        pooled_output = self.dropout(inputs=pooled_output, training=training)
+        logits = self.classifier(inputs=pooled_output)
+        loss = None if labels is None else self.hf_compute_loss(labels=labels, logits=logits)
+
+        if not return_dict:
+            output = (logits,) + text_model_output[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return TFSequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=text_model_output[2],
+            attentions=text_model_output[3],
+        )
+
+    def serving_output(self, output: TFSequenceClassifierOutput) -> TFSequenceClassifierOutput:
+        hs = tf.convert_to_tensor(output.hidden_states) if self.config.output_hidden_states else None
+        attns = tf.convert_to_tensor(output.attentions) if self.config.output_attentions else None
+
+        return TFSequenceClassifierOutput(logits=output.logits, hidden_states=hs, attentions=attns)
+

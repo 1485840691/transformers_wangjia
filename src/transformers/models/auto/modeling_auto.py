@@ -144,6 +144,7 @@ MODEL_MAPPING_NAMES = OrderedDict(
         ("xlnet", "XLNetModel"),
         ("yolos", "YolosModel"),
         ("yoso", "YosoModel"),
+        ("clip", "CLIPForSequenceClassification"),
     ]
 )
 

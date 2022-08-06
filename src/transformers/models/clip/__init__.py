@@ -62,6 +62,7 @@ else:
         "CLIPPreTrainedModel",
         "CLIPTextModel",
         "CLIPVisionModel",
+        "CLIPForSequenceClassification"
     ]
 
 try:
@@ -76,6 +77,7 @@ else:
         "TFCLIPPreTrainedModel",
         "TFCLIPTextModel",
         "TFCLIPVisionModel",
+        "TFCLIPForSequenceClassification",
     ]
 
 try:
@@ -91,6 +93,7 @@ else:
         "FlaxCLIPTextPreTrainedModel",
         "FlaxCLIPVisionModel",
         "FlaxCLIPVisionPreTrainedModel",
+        "FlaxCLIPForSequenceClassification",
     ]
 
 
@@ -127,6 +130,7 @@ if TYPE_CHECKING:
             CLIPPreTrainedModel,
             CLIPTextModel,
             CLIPVisionModel,
+            CLIPForSequenceClassification
         )
 
     try:

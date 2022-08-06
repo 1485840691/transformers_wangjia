@@ -25,7 +25,7 @@ from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
 
-from ...modeling_flax_outputs import FlaxBaseModelOutput, FlaxBaseModelOutputWithPooling
+from ...modeling_flax_outputs import FlaxBaseModelOutput, FlaxBaseModelOutputWithPooling, FlaxSequenceClassifierOutput
 from ...modeling_flax_utils import (
     ACT2FN,
     FlaxPreTrainedModel,
@@ -34,7 +34,6 @@ from ...modeling_flax_utils import (
 )
 from ...utils import ModelOutput, add_start_docstrings, logging
 from .configuration_clip import CLIPConfig, CLIPTextConfig, CLIPVisionConfig
-
 
 logger = logging.get_logger(__name__)
 
@@ -1178,3 +1177,98 @@ FLAX_CLIP_MODEL_DOCSTRING = """
 
 overwrite_call_docstring(FlaxCLIPModel, CLIP_INPUTS_DOCSTRING + FLAX_CLIP_MODEL_DOCSTRING)
 append_replace_return_docstrings(FlaxCLIPModel, output_type=FlaxCLIPOutput, config_class=CLIPConfig)
+
+
+class FlaxCLIPForSequenceClassificationModule(nn.Module):
+    config: CLIPConfig
+    dtype: jnp.dtype = jnp.float32
+
+    def setup(self):
+        self.clip_text_module = FlaxCLIPTextModule(config=self.config.text_config, dtype=self.dtype)
+        classifier_dropout = (
+            self.config.classifier_dropout
+            if self.config.classifier_dropout is not None
+            else self.config.hidden_dropout_prob
+        )
+        self.dropout = nn.Dropout(rate=classifier_dropout)
+        self.classifier = nn.Dense(
+            self.config.num_labels,
+            dtype=self.dtype,
+        )
+
+    def __call__(
+        self,
+        input_ids,
+        attention_mask,
+        position_ids,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        deterministic: bool = True,
+        return_dict: bool = True,
+    ):
+        # Model
+        outputs = self.clip_text_module(
+            input_ids,
+            attention_mask,
+            position_ids,
+            deterministic=deterministic,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        pooled_output = outputs.pooler_output
+        pooled_output = self.dropout(pooled_output, deterministic=deterministic)
+        logits = self.classifier(pooled_output)
+
+        if not return_dict:
+            return (logits,) + outputs[2:]
+
+        return FlaxSequenceClassifierOutput(
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+@add_start_docstrings(
+    """
+    Bert Model transformer with a sequence classification/regression head on top (a linear layer on top of the pooled
+    output) e.g. for GLUE tasks.
+    """,
+    CLIP_START_DOCSTRING,
+)
+
+class FlaxCLIPForSequenceClassification(FlaxCLIPPreTrainedModel):
+    module_class = FlaxCLIPForSequenceClassificationModule
+
+FLAX_CLIP_SEQUENCE_CLASSIFICATION_DOCSTRING = """
+    Returns:
+
+    Example:
+
+    ```python
+    >>> import jax
+    >>> from PIL import Image
+    >>> import requests
+    >>> from transformers import CLIPProcessor, FlaxCLIPModel
+
+    >>> model = FlaxCLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+    >>> processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+
+    >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
+    >>> image = Image.open(requests.get(url, stream=True).raw)
+
+    >>> inputs = processor(
+    ...     text=["a photo of a cat", "a photo of a dog"], images=image, return_tensors="np", padding=True
+    ... )
+
+    >>> outputs = model(**inputs)
+    >>> logits_per_image = outputs.logits_per_image  # this is the image-text similarity score
+    >>> probs = jax.nn.softmax(logits_per_image, axis=1)  # we can take the softmax to get the label probabilities
+    ```
+"""
+
+overwrite_call_docstring(FlaxCLIPForSequenceClassification, CLIP_INPUTS_DOCSTRING + FLAX_CLIP_SEQUENCE_CLASSIFICATION_DOCSTRING)
+append_replace_return_docstrings(FlaxCLIPForSequenceClassification, output_type=FlaxSequenceClassifierOutput, config_class=CLIPConfig)
+
